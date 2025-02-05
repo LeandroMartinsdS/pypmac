@@ -362,6 +362,55 @@ def plot(addr, data):
     logger.debug('Plotting')
     plt.show()
 
+def plot2(addr, data, x_addr='Sys.ServoCount.a', y1_addr=None, y2_addr=None, servo_period=None):
+    if y1_addr is None:
+        y1_addr = []
+    if y2_addr is None:
+        y2_addr = []
+
+    def get_addr_index(addr, target_addr):
+        try:
+            return addr.index(target_addr)
+        except ValueError:
+            logger.error(f"Address {target_addr} not found in addr list")
+            return -1
+
+    x_idx = get_addr_index(addr, x_addr)
+    data = np.array(data)
+    x_axis = (data[:, x_idx] - data[0, x_idx])
+
+
+    fig, ax1 = plt.subplots()
+    if x_addr == 'Sys.ServoCount.a':
+        ax1.set_xlabel('Time')
+    else:
+        ax1.set_xlabel(x_addr)
+    # Plot y1_addr on the left y-axis
+    for y1 in y1_addr:
+        y1_idx = get_addr_index(addr, y1)
+        ax1.plot(x_axis, data[:, y1_idx], label=y1)
+    ax1.set_ylabel('Y Axis')
+    ax1.legend(loc='upper left')
+
+    # Plot y2_addr on the right y-axis if provided
+    if y2_addr:
+        if y1_addr:
+            ax2 = ax1.twinx()
+            for y2 in y2_addr:
+                y2_idx = get_addr_index(addr, y2)
+                ax2.plot(x_axis, data[:, y2_idx], label=y2, linestyle='--')
+            ax1.set_ylabel('Y1 Axis')
+            ax2.set_ylabel('Y2 Axis')
+            ax2.legend(loc='upper right')
+        else:
+            for y2 in y2_addr:
+                y2_idx = get_addr_index(addr, y2)
+                ax1.plot(x_axis, data[:, y2_idx], label=y2)
+            ax1.set_ylabel('Y Axis')
+            ax1.legend(loc='upper left')
+
+    logger.debug('Plotting')
+    plt.show()
 
 def gather_and_plot(gpascii, addr, duration=0.2, period=1):
     servo_period = gpascii.servo_period
@@ -572,6 +621,105 @@ def run_and_gather(gpascii, script_text, prog=999, coord_sys=0,
     data = get_gather_results(comm, gather_vars, gather_output_file)
     return gather_vars, data
 
+def run_script_and_gather(gpascii, script_gather=[],
+                   gather_vars=[], period=1, samples=max_samples,
+                   pre_script=None, pos_script=None,
+                   timed_script=None, run_time=10, gather_timeout=60,
+                   cancel_callback=None, check_active=False,
+                   verbose=True):
+
+    """
+    Run text script and read back the gathered data
+    """
+
+
+    if 'gather.enable' not in script_gather.lower():
+        script_gather = '\n'.join(['gather.enable=2',
+                                 script_gather,
+                                 ])
+
+    if pre_script is not None:
+        script_gather = '\n'.join([pre_script,
+                                 script_gather,
+                                 ])
+
+    comm = gpascii._comm
+    gpascii.set_variable('gather.enable', '0')
+
+    gather_vars = InsList(gather_vars)
+
+    if 'sys.servocount.a' not in gather_vars:
+        gather_vars.insert(0, 'Sys.ServoCount.a')
+
+    settings = get_settings(gpascii.servo_period, gather_vars,
+                            gather_period=period,
+                            samples=samples)
+
+    settings = '\n'.join(settings)
+
+    comm.write_file(gather_config_file, settings)
+
+    logger.info('Wrote configuration to %s', gather_config_file)
+
+    comm.gpascii_file(gather_config_file, verbose=verbose)
+
+    for line in script_gather.split('\n'):
+        print(line)
+        gpascii.send_line(line.lstrip())
+
+    if check_active:
+        active_var = 'gather.enable'
+    else:
+        active_var = 'gather.enable'
+
+    def get_status():
+        return gpascii.get_variable(active_var, type_=int)
+
+    try:
+        vlog(verbose, "Waiting...")
+        while get_status() == 0:
+            time.sleep(0.1)
+
+        t0 = time.time()
+        while get_status() != 0 and (time.time() - t0) < gather_timeout:
+            if timed_script and (time.time() - t0) >= run_time:
+                for line in timed_script.split('\n'):
+                    gpascii.send_line(line.lstrip())
+            samples = gpascii.get_variable('gather.samples', type_=int)
+            vlog(verbose, "Working... got %6d data points - Elapsed time: %d seconds" % (samples,(time.time() - t0)), end='\r')
+            time.sleep(0.1)
+
+        # Check if the timeout was reached
+        if get_status() != 0 and (time.time() - t0) >= gather_timeout:
+            gpascii.send_line('gather.enable=0')
+            vlog(verbose, "\nTime out")
+
+        vlog(verbose, '\nDone')
+
+    except KeyboardInterrupt as ex:
+        vlog(verbose, 'Cancelled - stopping program')
+        #gpascii.kill_motor(motor)
+        if pos_script is not None:
+            for line in pos_script.split('\n'):
+                gpascii.send_line(line.lstrip())
+        if cancel_callback is not None:
+            cancel_callback(ex)
+
+    try:
+        for line in gpascii.read_timeout(timeout=0.1):
+            if 'error' in line:
+                if verbose:
+                    print(line)
+                logger.error(line)
+    except pp_comm.TimeoutError:
+        pass
+
+    if pos_script is not None:
+        for line in pos_script.split('\n'):
+            gpascii.send_line(line.lstrip())
+
+    data = get_gather_results(comm, gather_vars, gather_output_file)
+    return gather_vars, data
 
 def check_servocapt_rollover(scapt, rollover=1e6):
     ret = np.zeros(len(scapt), dtype=float)
