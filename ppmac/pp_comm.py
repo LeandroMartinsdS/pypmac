@@ -137,7 +137,8 @@ class ShellChannel(object):
 
         self.send_line('stty -echo')
         self.send_line(r'export PS1="\u@\h:\w\$ "')
-        self.wait_for('%s@.*' % comm._user, verbose=verbose)
+        # self.wait_for('%s@.*' % comm._user, verbose=verbose)
+        self.wait_for('.*Last login.*', verbose=verbose)
 
         if command is not None:
             self.send_line(command)
