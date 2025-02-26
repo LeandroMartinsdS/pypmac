@@ -19,6 +19,7 @@ import functools
 import logging
 
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Cursor
 import numpy as np
 
 from . import pp_comm
@@ -117,10 +118,10 @@ def read_settings_file(comm, fn=None):
 def parse_gather(addresses, lines, delim=' '):
     def fix_line(line):
         try:
-            return [ast.literal_eval(num) for num in line]
-        except Exception as ex:
-            raise RuntimeError('Unable to parse gather results (%s): %s [%s]' %
-                               (ex.__class__.__name__, ex, line))
+            return [int(float(num)) for num in line]
+        except (ValueError, SyntaxError) as e:
+            print(f"Error: {e}")
+            return None
 
     count = len(addresses)
     data = [fix_line(line.split(delim))
@@ -320,12 +321,15 @@ def get_gather_results(comm, addresses, output_file=gather_output_file):
         # Use the Delta Tau-supplied 'gather' program
 
         # -u is for upload
-        comm.shell_command('gather "%s" -u' % (output_file, ))
+        comm.shell_command('gather -u "%s"' % (output_file, ))
+        if comm.file_exists(output_file):
+            lines = [line.strip() for line in comm.read_file(output_file)]
+            rows = parse_gather(addresses, lines)
+            return _check_times(comm.gpascii, addresses, rows)
 
-        lines = [line.strip() for line in comm.read_file(output_file)]
-        rows = parse_gather(addresses, lines)
+        else:
+            print("File not found")
 
-    return _check_times(comm.gpascii, addresses, rows)
 
 
 def gather_data_to_file(fn, addr, data, delim='\t'):
@@ -362,7 +366,23 @@ def plot(addr, data):
     logger.debug('Plotting')
     plt.show()
 
-def plot2(addr, data, x_addr='Sys.ServoCount.a', y1_addr=None, y2_addr=None, servo_period=None):
+def create_on_mouse_event(x, y, ax, fig, color):
+    vline = ax.axvline(color=color, linewidth=1)
+    hline = ax.axhline(color=color, linewidth=1)
+    text = ax.text(0, 0, '', color=color, fontsize=12, ha='right')
+
+    def on_mouse_event(event):
+        if event.inaxes:
+            nearest_x = x[np.abs(x - event.xdata).argmin()]
+            nearest_y = y[np.abs(x - event.xdata).argmin()]
+            vline.set_xdata([nearest_x])
+            hline.set_ydata([nearest_y])
+            text.set_position((nearest_x, nearest_y))
+            text.set_text(f'({nearest_x:.3f}, {nearest_y:.3f})')
+            fig.canvas.draw_idle()
+    return on_mouse_event
+
+def plot2(addr, data, x_addr='Sys.ServoCount.a', y1_addr=None, y2_addr=None, servo_period=None, wrtHome=True, gpascii=None, minor_grid_start=None, minor_grid_end=None):
     if y1_addr is None:
         y1_addr = []
     if y2_addr is None:
@@ -375,19 +395,41 @@ def plot2(addr, data, x_addr='Sys.ServoCount.a', y1_addr=None, y2_addr=None, ser
             logger.error(f"Address {target_addr} not found in addr list")
             return -1
 
+    def adjust_position(data, addr, axis_idx):
+        match = re.search(r'\[(\d+)\]', addr[axis_idx])
+        if match:
+            motor = int(match.group(1))
+            offset = gpascii.get_variable('Motor[%d].HomePos' % motor, type_=int)
+            print(f"Offset of motor {motor}: {offset}")
+            data[:, axis_idx] -= offset
+        return data
+
     x_idx = get_addr_index(addr, x_addr)
     data = np.array(data)
-    x_axis = (data[:, x_idx] - data[0, x_idx])
-
 
     fig, ax1 = plt.subplots()
     if x_addr == 'Sys.ServoCount.a':
+        x_axis = (data[:, x_idx] - data[0, x_idx])
         ax1.set_xlabel('Time')
+    elif ('.pos' in x_addr.lower() or
+         '.actpos' in x_addr.lower() or
+         '.despos' in x_addr.lower() and
+         wrtHome):
+        print(f"{x_addr} being adjusted wrt Home")
+        x_axis = adjust_position(data, addr, x_idx)
+        ax1.set_xlabel(x_addr)
     else:
         ax1.set_xlabel(x_addr)
+
     # Plot y1_addr on the left y-axis
     for y1 in y1_addr:
         y1_idx = get_addr_index(addr, y1)
+        if ('.pos' in addr[y1_idx].lower() or
+           '.actpos' in addr[y1_idx].lower() or
+           '.despos' in addr[y1_idx].lower() and
+           wrtHome):
+            print(f"{addr[y1_idx]} being adjusted wrt Home")
+            data = adjust_position(data, addr, y1_idx)
         ax1.plot(x_axis, data[:, y1_idx], label=y1)
     ax1.set_ylabel('Y Axis')
     ax1.legend(loc='upper left')
@@ -398,6 +440,12 @@ def plot2(addr, data, x_addr='Sys.ServoCount.a', y1_addr=None, y2_addr=None, ser
             ax2 = ax1.twinx()
             for y2 in y2_addr:
                 y2_idx = get_addr_index(addr, y2)
+                if ('.pos' in x_addr.lower() or
+                   '.actpos' in x_addr.lower() or
+                   '.despos' in x_addr.lower() and
+                   wrtHome):
+                    print(f"{addr[y1_idx]} being adjusted wrt Home")
+                    data = adjust_position(data, addr, y2_idx)
                 ax2.plot(x_axis, data[:, y2_idx], label=y2, linestyle='--')
             ax1.set_ylabel('Y1 Axis')
             ax2.set_ylabel('Y2 Axis')
@@ -408,6 +456,10 @@ def plot2(addr, data, x_addr='Sys.ServoCount.a', y1_addr=None, y2_addr=None, ser
                 ax1.plot(x_axis, data[:, y2_idx], label=y2)
             ax1.set_ylabel('Y Axis')
             ax1.legend(loc='upper left')
+
+    # # Connect the event handlers
+    # fig.canvas.mpl_connect('motion_notify_event', create_on_mouse_event(data[:,x_idx], data[:,y1_idx], ax1, fig, 'red'))
+    # fig.canvas.mpl_connect('motion_notify_event', create_on_mouse_event(data[:,x_idx], data[:,y1_idx], ax2, fig, 'blue'))
 
     logger.debug('Plotting')
     plt.show()
@@ -659,14 +711,6 @@ def run_script_and_gather(gpascii, script_gather=[],
 
     comm.write_file(gather_config_file, settings)
 
-    logger.info('Wrote configuration to %s', gather_config_file)
-
-    comm.gpascii_file(gather_config_file, verbose=verbose)
-
-    for line in script_gather.split('\n'):
-        print(line)
-        gpascii.send_line(line.lstrip())
-
     if check_active:
         active_var = 'gather.enable'
     else:
@@ -675,24 +719,32 @@ def run_script_and_gather(gpascii, script_gather=[],
     def get_status():
         return gpascii.get_variable(active_var, type_=int)
 
+    logger.info('Wrote configuration to %s', gather_config_file)
+
+    comm.gpascii_file(gather_config_file, verbose=verbose)
+    for line in script_gather.split('\n'):
+        print(line)
+        gpascii.send_line(line.lstrip())
+
+
     try:
         vlog(verbose, "Waiting...")
-        while get_status() == 0:
+        while gpascii.get_variable('gather.enable', type_=int)==0:
             time.sleep(0.1)
 
         t0 = time.time()
         while get_status() != 0 and (time.time() - t0) < gather_timeout:
+            samples = gpascii.get_variable('gather.samples', type_=int)
+            vlog(verbose, "Working... got %6d data points - Elapsed time: %d seconds" % (samples,(time.time() - t0)), end='\r')
             if timed_script and (time.time() - t0) >= run_time:
                 for line in timed_script.split('\n'):
                     gpascii.send_line(line.lstrip())
-            samples = gpascii.get_variable('gather.samples', type_=int)
-            vlog(verbose, "Working... got %6d data points - Elapsed time: %d seconds" % (samples,(time.time() - t0)), end='\r')
-            time.sleep(0.1)
-
-        # Check if the timeout was reached
-        if get_status() != 0 and (time.time() - t0) >= gather_timeout:
-            gpascii.send_line('gather.enable=0')
-            vlog(verbose, "\nTime out")
+            else:
+                time.sleep(0.0001)
+            # Check if the timeout was reached
+            if (time.time() - t0) >= gather_timeout:
+                gpascii.set_variable('gather.enable',0)
+                vlog(verbose, "\nTime out")
 
         vlog(verbose, '\nDone')
 
