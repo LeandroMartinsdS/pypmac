@@ -1,0 +1,38 @@
+// For format details, see https://containers.dev/implementors/json_reference/
+{
+    "name": "Python 3 Developer Container",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "target": "developer"
+    },
+    "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+    "remoteEnv": {
+        "DISPLAY": "${localEnv:DISPLAY}" // Allow X11 apps to run inside the container
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/venv/bin/python"
+            },
+            "extensions": [
+                "ms-python.python",
+                "github.vscode-github-actions",
+                "tamasfe.even-better-toml",
+                "redhat.vscode-yaml",
+                "ryanluker.vscode-coverage-gutters",
+                "charliermarsh.ruff",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    },
+    "features": {
+        "ghcr.io/diamondlightsource/devcontainer-features/bash-config:1.0.0": {}
+    },
+    "initializeCommand": "mkdir -p ${localEnv:HOME}/.config/bash-config",
+    "runArgs": [
+        "--net=host", // Allow the container to access the host X11 display and EPICS CA
+        "--security-opt=label=disable" // Ensure SELinux doesn't block access to host filesystems
+    ],
+    "workspaceMount": "source=${localWorkspaceFolder}/..,target=/workspaces,type=bind",
+    "postCreateCommand": "pip install -e ."
+}
